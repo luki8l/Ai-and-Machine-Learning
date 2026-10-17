@@ -158,14 +158,41 @@ def load_volare(path: str, symbols=None) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def realized_from_bars(bars: pd.DataFrame, session=("09:30", "15:55")) -> pd.DataFrame:
+def clean_bar_prices(lp: np.ndarray, half: int = 5, k: float = 10.0, floor: float = 0.01):
+    """Remove isolated bad prints from one day's 5-min log-price path.
+
+    Bar-level version of the Barndorff-Nielsen et al. (2009) rule used by VOLARE/Oxford-Man:
+    a price is dropped if it deviates from the median of its centered neighbourhood
+    (+-`half` bars, itself excluded) by more than `k` mean absolute deviations AND by more
+    than `floor` (1% in log terms). Level shifts (real jumps) survive because the
+    neighbourhood median moves with them; one-bar spikes that revert are removed.
+    Dropped prices are replaced by the previous valid price.
+    Returns (cleaned path, number of flagged prices).
+    """
+    n = len(lp)
+    bad = np.zeros(n, bool)
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        if hi - lo < 2 * half + 1:                      # keep window size at the edges
+            lo, hi = (0, min(n, 2 * half + 1)) if lo == 0 else (max(0, n - 2 * half - 1), n)
+        w = np.delete(lp[lo:hi], i - lo)
+        med = np.median(w)
+        mad = np.mean(np.abs(w - med))
+        dev = abs(lp[i] - med)
+        bad[i] = dev > k * mad and dev > floor
+    out = pd.Series(np.where(bad, np.nan, lp)).ffill().bfill().to_numpy()
+    return out, int(bad.sum())
+
+
+def realized_from_bars(bars: pd.DataFrame, session=("09:30", "15:55"), clean=True) -> pd.DataFrame:
     """Fallback if VOLARE is unavailable: turn intraday bars (e.g. 5-min bars from
     the Alpaca free API, or Binance klines) into VOLARE-like daily measures.
 
     `bars`: columns timestamp (exchange local time, bar START time), symbol, open,
     close, volume. Default session keeps the 78 regular-hours 5-min bars 09:30-15:55 ET.
     Use session=None for 24/7 markets (crypto, UTC days).
-    Returns date, symbol, rv, rq, rsp, rsn, open, close, volume (raw units).
+    clean=True removes isolated bad prints (see clean_bar_prices) before computing returns.
+    Returns date, symbol, rv, rq, rsp, rsn, open, close, volume, n_flagged (raw units).
     """
     b = bars.copy()
     b["timestamp"] = pd.to_datetime(b["timestamp"])
@@ -175,14 +202,19 @@ def realized_from_bars(bars: pd.DataFrame, session=("09:30", "15:55")) -> pd.Dat
     b["date"] = b.index.normalize()
     out = []
     for (sym, d), g in b.groupby(["symbol", "date"]):
-        r = np.diff(np.log(np.r_[g["open"].iloc[0], g["close"].to_numpy()]))
+        lp = np.log(np.r_[g["open"].iloc[0], g["close"].to_numpy()])
+        nflag = 0
+        if clean:
+            lp, nflag = clean_bar_prices(lp)
+        r = np.diff(lp)
         m = len(r)
         if m < 30:
             continue
         out.append({"date": d, "symbol": sym, "rv": np.sum(r ** 2),
                     "rq": m / 3 * np.sum(r ** 4), "rsp": np.sum(r[r > 0] ** 2),
-                    "rsn": np.sum(r[r < 0] ** 2), "open": g["open"].iloc[0],
-                    "close": g["close"].iloc[-1], "volume": g["volume"].sum()})
+                    "rsn": np.sum(r[r < 0] ** 2), "open": float(np.exp(lp[0])),
+                    "close": float(np.exp(lp[-1])), "volume": g["volume"].sum(),
+                    "n_flagged": nflag})
     return pd.DataFrame(out)
 
 
@@ -705,6 +737,8 @@ def variable_importance(model, X: pd.DataFrame, cols):
     """Paper eq. (30)-(31): std of centered ALE, normalized to sum to one."""
     I = {c: np.std(ale(model, X, c)[2], ddof=1) for c in cols}
     tot = sum(I.values())
+    if not np.isfinite(tot) or tot <= 0:            # e.g. elastic net shrunk to a constant
+        return pd.Series(np.nan, index=list(cols))
     return pd.Series({c: v / tot for c, v in I.items()}).sort_values(ascending=False)
 
 

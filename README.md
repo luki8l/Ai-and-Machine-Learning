@@ -45,6 +45,12 @@ The paper's IV variable (OptionMetrics model-free IV) is one of its three most i
 
 RICs are `<TICKER>ATMIV.U` (e.g. `AAPLATMIV.U`), fields `TR.30DAYATTHEMONEYIMPLIEDVOLATILITYINDEXFORCALLOPTIONS` / `...PUTOPTIONS` (taken from the LSEG developer forum; not tested by us). If a stock returns no data, look the RIC up in Workspace. IV is only used if it covers at least 90% of a stock's days.
 
+### Data cleaning (Alpaca bars)
+
+Raw consolidated bars contain occasional bad prints (e.g. AMGN on 25 Oct 2016 with an RV ~5,600× its median; the NYSE opening-auction malfunction on 24 Jan 2023 hit VZ, V, MCD, WMT, NKE). `realized_from_bars` therefore removes isolated one-bar spikes before computing RV (bar-level version of the Barndorff-Nielsen et al. 2009 rule used by the Oxford-Man library and VOLARE: drop a price if it deviates from the median of its ±5-bar neighbourhood by more than 10 mean absolute deviations and by more than 1%; real jumps that persist are kept).
+
+If you downloaded before this change: `python fetch_data.py rebuild` recomputes `data/alpaca/realized.csv` from the cached bars (no keys, no download, a few minutes), keeps the old file as `realized_uncleaned.csv` and writes `cleaning_log.csv` with every flagged day.
+
 **Action item #1 (today):** one person downloads the VOLARE stock file(s) into `data/volare/` and runs the first two notebook cells. The loader prints the columns it found; if a name is not recognized, add it to `_ALIASES` in `volml.py`.
 
 ## 3. How to run

@@ -5,6 +5,9 @@ All three write a daily file in the same format the notebook reads
 (date, symbol, rv, rq, rsp, rsn, open, close, volume), so only
 `cfg.volare_path` changes in the notebook.
 
+  Rebuild realized measures from already downloaded Alpaca bars (with bad-print cleaning):
+        python fetch_data.py rebuild
+
   A) Alpaca (recommended fallback): true 5-min realized variance, Dow 30, 2016 -> today.
      Needs a FREE Alpaca paper account (email sign-up, open to non-US residents)
      -> dashboard -> API keys.  ~10-20 min download for 30 stocks.
@@ -85,13 +88,39 @@ def fetch_alpaca(key, secret, symbols, start="2016-01-01", end=None, feed="sip")
                 time.sleep(0.35)
             bars = pd.concat(parts, ignore_index=True)
             bars.to_csv(path, index=False)
-        d = realized_from_bars(bars)                   # regular session 09:30-16:00 ET
+        d = realized_from_bars(bars)                   # regular session 09:30-16:00 ET, bad prints removed
         print(f"{sym}: {len(bars):,} bars -> {len(d):,} days "
-              f"({d['date'].min().date()} -> {d['date'].max().date()})")
+              f"({d['date'].min().date()} -> {d['date'].max().date()}), "
+              f"{int(d['n_flagged'].sum())} bad prints removed")
         daily.append(d)
     out = pd.concat(daily, ignore_index=True)
     out.to_csv(f"{OUT}/alpaca/realized.csv", index=False)
     print(f"wrote {OUT}/alpaca/realized.csv  -> cfg.volare_path = '{OUT}/alpaca/realized.csv'")
+    return out
+
+
+def rebuild_alpaca(symbols):
+    """Recompute data/alpaca/realized.csv from the cached 5-min bars (no API keys,
+    no download). Keeps the previous file as realized_uncleaned.csv for comparison."""
+    old = f"{OUT}/alpaca/realized.csv"
+    backup = f"{OUT}/alpaca/realized_uncleaned.csv"
+    if os.path.exists(old) and not os.path.exists(backup):
+        os.replace(old, backup)
+    daily, log = [], []
+    for sym in symbols:
+        path = f"{OUT}/alpaca/bars/{sym}.csv"
+        if not os.path.exists(path):
+            print(f"{sym}: no cached bars, skipped")
+            continue
+        d = realized_from_bars(pd.read_csv(path, parse_dates=["timestamp"]))
+        daily.append(d)
+        log.append(d.loc[d["n_flagged"] > 0, ["date", "symbol", "n_flagged"]])
+        print(f"{sym}: {len(d):,} days, {int(d['n_flagged'].sum())} bad prints removed "
+              f"on {int((d['n_flagged'] > 0).sum())} days")
+    out = pd.concat(daily, ignore_index=True)
+    out.to_csv(old, index=False)
+    pd.concat(log).to_csv(f"{OUT}/alpaca/cleaning_log.csv", index=False)
+    print(f"wrote {old} (cleaned) and {OUT}/alpaca/cleaning_log.csv")
     return out
 
 
@@ -168,7 +197,7 @@ def fetch_binance(symbols, start="2018-01"):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("source", choices=["alpaca", "yahoo", "binance"])
+    ap.add_argument("source", choices=["alpaca", "rebuild", "yahoo", "binance"])
     ap.add_argument("--key")
     ap.add_argument("--secret")
     ap.add_argument("--symbols", nargs="*")
@@ -177,6 +206,8 @@ if __name__ == "__main__":
     if a.source == "alpaca":
         fetch_alpaca(a.key or os.environ["APCA_API_KEY_ID"], a.secret or os.environ["APCA_API_SECRET_KEY"],
                      a.symbols or DOW30_VOLARE, start=a.start or "2016-01-01")
+    elif a.source == "rebuild":
+        rebuild_alpaca(a.symbols or DOW30_VOLARE)
     elif a.source == "yahoo":
         fetch_yahoo(a.symbols or DOW30_VOLARE, start=a.start or "2001-01-01")
     else:

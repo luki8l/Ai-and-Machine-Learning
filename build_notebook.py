@@ -202,7 +202,7 @@ for s in vi_syms:
     vis.append(vi)
     if s == vi_syms[0]:
         fitted_aapl, tr_aapl = fitted, tr
-VI = sum(vis) / len(vis)
+VI = pd.concat(vis).groupby(level=0).mean()     # ignores stocks where a model is constant (NaN)
 fig, axes = plt.subplots(1, VI.shape[1], figsize=(14, 4), sharex=True)
 for ax, m in zip(axes, VI.columns):
     VI[m].sort_values().plot.barh(ax=ax); ax.set_title(m)
