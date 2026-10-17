@@ -603,13 +603,16 @@ def dm_test(e_bench, e_model, h=1):
     return stat, 1 - stats.t.cdf(stat, df=T - 1)
 
 
-def loss_frames(preds, ds, h, loss="mse"):
-    """Per-stock loss series for every model -> {sym: DataFrame(date x model)}."""
+def loss_frames(preds, ds, h, loss="mse", exclude=None):
+    """Per-stock loss series for every model -> {sym: DataFrame(date x model)}.
+    exclude=("2025-03-01", "2025-04-30") drops forecast origins in that window."""
     out = {}
     for s, r in preds.items():
         if (ds, h) not in r:
             continue
         P = r[(ds, h)]
+        if exclude is not None:
+            P = P[~((P.index >= exclude[0]) & (P.index <= exclude[1]))]
         y = P["y"].to_numpy()[:, None]
         M = P.drop(columns="y")
         L = (M.to_numpy() - y) ** 2 if loss == "mse" else qlike(y, M.to_numpy())
@@ -617,11 +620,11 @@ def loss_frames(preds, ds, h, loss="mse"):
     return out
 
 
-def relative_table(preds, ds, h, loss="mse"):
+def relative_table(preds, ds, h, loss="mse", exclude=None):
     """Paper Table 2-7 layout: entry (row=benchmark, col=model) = cross-sectional
     average of loss(model)/loss(benchmark). Stars: DM test rejected for >50% of
     stocks at 10% (*), 5% (**), 1% (***)."""
-    L = loss_frames(preds, ds, h, loss)
+    L = loss_frames(preds, ds, h, loss, exclude)
     models = list(next(iter(L.values())).columns)
     ratio = pd.DataFrame(np.nan, index=models, columns=models)
     txt = pd.DataFrame("-", index=models, columns=models)
@@ -639,6 +642,18 @@ def relative_table(preds, ds, h, loss="mse"):
                     else "*" if np.mean(ps < .10) > .5 else "")
             txt.loc[b, m] = f"{np.mean(rs):.3f}{star}"
     return ratio, txt
+
+
+def error_share(preds, window, ds="M_HAR", h=1, model="HAR"):
+    """Share of a model's total squared error that falls into `window` (avg over stocks)."""
+    sh, frac = [], []
+    for r in preds.values():
+        P = r[(ds, h)]
+        e = (P[model] - P["y"]) ** 2
+        m = (P.index >= window[0]) & (P.index <= window[1])
+        sh.append(e[m].sum() / e.sum())
+        frac.append(m.mean())
+    return float(np.mean(sh)), float(np.mean(frac))
 
 
 def per_stock_relative(preds, ds, h, bench="HAR", loss="mse"):
@@ -693,10 +708,10 @@ def variable_importance(model, X: pd.DataFrame, cols):
     return pd.Series({c: v / tot for c, v in I.items()}).sort_values(ascending=False)
 
 
-def vi_for_stock(stock, macro, cfg, d_tr, d_va, which=("HAR-X", "EN", "RF", "NN")):
+def vi_for_stock(stock, macro, cfg, d_tr, d_va, which=("HAR-X", "EN", "RF", "NN"), ea=None, iv=None):
     """Fit the 'preferred' models on the initial training set (M_ALL, h=1) and
     return VI per model (as in paper Figure 7) plus the fitted models."""
-    f = build_features(stock, macro, cfg)
+    f = build_features(stock, macro, cfg, ea, iv)
     mc = ml_cols("M_ALL", f)
     D = f[mc + ["y1"]].dropna()
     n_tr = int((D.index <= d_tr).sum())

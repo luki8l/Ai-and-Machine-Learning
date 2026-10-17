@@ -34,6 +34,17 @@ All fallbacks write the same daily format, so only `DATA_SOURCE` in the notebook
 
 Suggested order: start Plan B right now (works instantly), set up the Alpaca account in parallel and switch to Plan A once its download is done; switch to VOLARE if access arrives in time. The code is identical for all three.
 
+### Optional: per-stock implied volatility from LSEG Workspace (uni licence)
+
+The paper's IV variable (OptionMetrics model-free IV) is one of its three most important predictors (Figure 7). The closest substitute we can get is LSEG's 30-day at-the-money implied vol:
+
+1. Open LSEG Workspace and log in with the uni account (the script uses the desktop session).
+2. `pip install lseg-data`
+3. `python fetch_iv_lseg.py` → writes `data/lseg/iv.csv` (date, symbol, iv)
+4. Re-run the notebook: the IV file is detected automatically, results go to a separate folder `results/<source>_<quick|full>_iv/`, so you can compare runs with and without IV.
+
+RICs are `<TICKER>ATMIV.U` (e.g. `AAPLATMIV.U`), fields `TR.30DAYATTHEMONEYIMPLIEDVOLATILITYINDEXFORCALLOPTIONS` / `...PUTOPTIONS` (taken from the LSEG developer forum; not tested by us). If a stock returns no data, look the RIC up in Workspace. IV is only used if it covers at least 90% of a stock's days.
+
 **Action item #1 (today):** one person downloads the VOLARE stock file(s) into `data/volare/` and runs the first two notebook cells. The loader prints the columns it found; if a name is not recognized, add it to `_ALIASES` in `volml.py`.
 
 ## 3. How to run
@@ -47,7 +58,7 @@ jupyter notebook replication.ipynb
 - `QUICK = True`: 8 stocks, lighter models, roughly 10–20 min on a laptop. Do this first.
 - `QUICK = False`: all 30 stocks, paper settings. Measured on one core: about 70 s per stock × horizon × information set → about 3.5 CPU hours in total, i.e. 30–60 min on a 4–8-core laptop (runs in parallel over stocks). Results are cached in `results/`.
 
-Outputs in `results/`: `summary_vs_paper.csv` (our HAR-relative MSEs next to the paper's), the full pairwise tables (`table_<set>_h<h>.csv`, paper layout with DM-test stars), and Figures 3, 5, 6, 7 as PNG.
+Outputs in `results/<source>_<quick|full>[_iv]/`: `summary_vs_paper.csv` (our HAR-relative MSEs next to the paper's), the full pairwise tables (`table_<set>_h<h>.csv`, paper layout with DM-test stars), and Figures 3, 5, 6, 7 as PNG.
 
 ## 4. What is replicated, and deviations
 
@@ -98,6 +109,7 @@ Same as the paper: 70/10/20 split; targets = average RV over the next 1/5/22 day
 - `replication.ipynb` – the notebook to run and submit
 - `volml.py` – all code (data, features, models, evaluation, ALE)
 - `fetch_data.py` – fallback data downloads (Alpaca / Yahoo / Binance)
+- `fetch_iv_lseg.py` – optional per-stock implied vol from LSEG Workspace
 - `build_notebook.py` – regenerates the notebook from source
 
 Cite VOLARE as: Cipollini, Cruciani, Gallo, Insana, Otranto & Spagnolo (2026), *VOLatility Archive for Realized Estimates (VOLARE)*, arXiv:2602.19732.

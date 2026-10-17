@@ -30,12 +30,14 @@ DRY_RUN = False     # True: simulated data, no downloads needed (pipeline test o
 
 # Data source: "volare" (preferred) | "alpaca" (5-min bars, 2016+) | "yahoo" (daily range proxy, 2001+) | "binance" (crypto)
 # Fallback files are created with:  python fetch_data.py alpaca|yahoo|binance  (see README)
-DATA_SOURCE = "volare"
+DATA_SOURCE = "alpaca"
 PATHS = {"volare": "data/volare", "alpaca": "data/alpaca/realized.csv",
          "yahoo": "data/yahoo/realized.csv", "binance": "data/binance/realized.csv"}
 cfg = V.Config(volare_path=PATHS[DATA_SOURCE])
 if DATA_SOURCE == "yahoo":
     cfg.start = "2001-01-01"      # paper window + extension; set cfg.end = "2017-12-31" to mimic the paper sample
+# per-stock implied vol from LSEG (python fetch_iv_lseg.py) is used automatically if present
+cfg.iv_file = "data/lseg/iv.csv" if os.path.exists("data/lseg/iv.csv") else None
 if QUICK and DATA_SOURCE != "binance":
     cfg.symbols = ["AAPL", "MSFT", "JPM", "KO", "BA", "CVX", "WMT", "IBM"]
     cfg.rf_trees, cfg.nn_seeds, cfg.nn_top, cfg.refit_trees = 200, 5, 3, 126
@@ -77,7 +79,8 @@ code(r"""
 ann = lambda x: np.sqrt(252 * x)     # RV is stored in (daily %)^2
 desc = []
 for s, g in panel.groupby("symbol"):
-    f = V.build_features(g, macro, cfg)
+    f = V.build_features(g, macro, cfg, None if ea is None else ea[ea.symbol == s],
+                         None if iv is None else iv[iv.symbol == s])
     t = pd.DataFrame({"RVD": ann(f["RVD"]), "RVW": ann(f["RVW"]), "RVM": ann(f["RVM"])})
     for c in V.extra_cols(f):
         t[c] = f[c]
@@ -88,7 +91,11 @@ desc.round(2)
 
 md("## 2. Forecasting (rolling out-of-sample, all models, both information sets, h = 1, 5, 22)")
 code(r"""
-pkl = os.path.join(cfg.results_dir, f"preds_{'quick' if QUICK else 'full'}.pkl")
+tag = f"{DATA_SOURCE}_{'quick' if QUICK else 'full'}{'_iv' if iv is not None else ''}"
+cfg.results_dir = os.path.join("results", tag)            # one folder per run variant
+os.makedirs(cfg.results_dir, exist_ok=True)
+pkl = os.path.join(cfg.results_dir, "preds.pkl")
+print("results ->", cfg.results_dir)
 if os.path.exists(pkl):
     preds, info = pd.read_pickle(pkl)
 else:
@@ -138,6 +145,26 @@ ql = {(ds, f"h={h}"): V.relative_table(preds, ds, h, loss="qlike")[1].loc["HAR"]
 pd.DataFrame(ql).drop(index="HAR").fillna("")
 """)
 
+md(r"""
+### Robustness: how much does one episode drive the result?
+
+MSE on realized variance in levels is dominated by a few extreme days. In our test window the tariff shock around 2 April 2025 is such an episode. We report the share of the HAR's squared error that falls into March–April 2025 and the relative MSEs without forecast origins in that window.
+""")
+code(r"""
+EPISODE = ("2025-03-01", "2025-04-30")
+for h in cfg.horizons:
+    share, frac = V.error_share(preds, EPISODE, "M_HAR", h)
+    print(f"h={h}: {share:.0%} of HAR squared error comes from {frac:.0%} of test days")
+ex = {}
+for ds in cfg.datasets:
+    for h in cfg.horizons:
+        ex[(ds, f"h={h}", "all")] = V.relative_table(preds, ds, h)[1].loc["HAR"]
+        ex[(ds, f"h={h}", "ex episode")] = V.relative_table(preds, ds, h, exclude=EPISODE)[1].loc["HAR"]
+ex = pd.DataFrame(ex).drop(index="HAR").fillna("")
+ex.to_csv(f"{cfg.results_dir}/robustness_ex_episode.csv")
+ex
+""")
+
 md("## 4. Cross-section of relative MSE (cf. paper Figure 3)")
 code(r"""
 fig, axes = plt.subplots(1, 2, figsize=(14, 4.5), sharey=True)
@@ -169,7 +196,9 @@ d_tr, d_va = V.split_dates(panel[panel.date >= cfg.start], cfg)
 vi_syms = cfg.symbols[:8]                       # VI is the slowest part; 8 stocks are enough for the figure
 vis, fitted_aapl = [], None
 for s in vi_syms:
-    vi, fitted, tr = V.vi_for_stock(panel[panel.symbol == s], macro, cfg, d_tr, d_va)
+    vi, fitted, tr = V.vi_for_stock(panel[panel.symbol == s], macro, cfg, d_tr, d_va,
+                                    ea=None if ea is None else ea[ea.symbol == s],
+                                    iv=None if iv is None else iv[iv.symbol == s])
     vis.append(vi)
     if s == vi_syms[0]:
         fitted_aapl, tr_aapl = fitted, tr
@@ -182,7 +211,7 @@ VI.round(3)
 """)
 code(r"""
 # ALE curves for the first stock (paper Figure 6 uses Apple)
-cols = [c for c in ["RVD", "RVW", "VIX", "M1W"] if c in tr_aapl]
+cols = [c for c in ["RVD", "RVW", "IV", "VIX", "M1W"] if c in tr_aapl]
 fig, axes = plt.subplots(1, len(cols), figsize=(16, 3.8))
 for ax, c in zip(axes, cols):
     for name, m in fitted_aapl.items():
@@ -198,7 +227,8 @@ md(r"""
 | Paper | This replication | Why |
 |---|---|---|
 | NYSE TAQ, 29 DJIA stocks, 2001–2017 | VOLARE 5-min RV, Dow 30, 2015–latest | TAQ is not available to us; VOLARE is open and built from cleaned tick data with the same 5-min RV estimator |
-| Model-free IV per stock (OptionMetrics), earnings dummy | Omitted by default (optional CSV hooks); VIX keeps the market-implied-vol channel | Not openly available |
+| Model-free IV per stock (OptionMetrics) | 30-day ATM implied vol from LSEG Workspace (if `fetch_iv_lseg.py` was run), otherwise omitted; VIX keeps the market-implied-vol channel | OptionMetrics not available to us |
+| Earnings announcement dummy | Omitted (optional CSV hook) | No clean open source for 2016–2026 |
 | Tuning and RF/GB re-estimated daily | OLS daily; regularization every 22 days, trees every 63 days (configurable) | Compute budget on laptops; hyperparameters tuned once on the validation block |
 | NN: L-ReLU, dropout, 100 seeds → best 10 | scikit-learn MLP, ReLU, L2 + early stopping, 10 seeds → best 5 | Paper reports ReLU makes no material difference (fn. 7) |
 | Adaptive / post lasso, bagging, MCS, VaR | Not run by default (BG available via `cfg.models`) | Scope for one week |
