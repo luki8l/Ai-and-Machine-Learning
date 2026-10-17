@@ -114,10 +114,23 @@ Same as the paper: 70/10/20 split; targets = average RV over the next 1/5/22 day
 - **Thu 22.10:** rehearsal, freeze code + data for submission
 - **Fri 23.10:** presentation; submit notebook, `volml.py`, data files
 
+## Split scenarios and slide figures (notebook sections 5 and 8)
+
+The notebook runs three sample splits and caches each in `results/<run>/<scenario>/preds.pkl`:
+
+| Scenario | Training | Validation | Test |
+|---|---|---|---|
+| `baseline` | 70% (2016–2023) | 10% | 20% (2024–2026), COVID in training |
+| `covid_test` | 2016 – Jun 2019 | Jul – Dec 2019 | 2020 – 2026, COVID out-of-sample |
+| `ex2020` | as baseline | as baseline | as baseline, 2020 removed from every estimation window |
+
+Slide figures (PNG, 220 dpi) are written to `results/<run>/slides/`, all tables to `results/<run>/slides_tables.xlsx`. Plot code: `volplots.py`.
+
 ## Files
 
 - `replication.ipynb` – the notebook to run and submit
 - `volml.py` – all code (data, features, models, evaluation, ALE)
+- `volplots.py` – slide figures
 - `fetch_data.py` – fallback data downloads (Alpaca / Yahoo / Binance)
 - `fetch_iv_lseg.py` – optional per-stock implied vol from LSEG Workspace
 - `build_notebook.py` – regenerates the notebook from source

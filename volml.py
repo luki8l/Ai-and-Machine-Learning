@@ -48,6 +48,8 @@ class Config:
     datasets: tuple = ("M_HAR", "M_ALL")
     train_frac: float = 0.70                   # paper: 70 / 10 / 20
     val_frac: float = 0.10
+    split: tuple | None = None                 # explicit (last train date, last val date); overrides fractions
+    train_exclude: tuple | None = None         # (start, end): rows dropped from every estimation window
     # estimation schedule (paper: daily rolling for everything except NN)
     refit_linear: int = 1                      # OLS HAR family: daily re-estimation
     refit_reg: int = 22                        # ridge / lasso / EN: re-estimate every N days
@@ -104,6 +106,8 @@ def _read_any(path):
         return pd.read_parquet(path)
     if path.endswith((".xlsx", ".xls")):
         return pd.read_excel(path)
+    if path.endswith(".csv"):
+        return pd.read_csv(path)                     # VOLARE: comma-separated, quoted fields
     return pd.read_csv(path, sep=None, engine="python")
 
 
@@ -117,6 +121,7 @@ def load_volare(path: str, symbols=None) -> pd.DataFrame:
     files = [path] if os.path.isfile(path) else sorted(
         f for ext in ("csv", "parquet", "txt", "xlsx")
         for f in glob.glob(os.path.join(path, f"**/*.{ext}"), recursive=True))
+    files = [f for f in files if not os.path.basename(f).lower().startswith(("readme", "cleaning_log"))]
     if not files:
         raise FileNotFoundError(f"No VOLARE files found under '{path}'.")
     frames = []
@@ -498,7 +503,7 @@ def run_one(f, ds, h, cfg: Config, d_tr, d_va):
              if m in ("HAR", "HAR-X", "LogHAR", "LevHAR", "SHAR", "HARQ")}
     specs = {k: v for k, v in specs.items() if v is not None}
     cols = sorted(set(sum([s.cols for s in specs.values()], [])) | set(ml_cols(ds, f)))
-    D = f[cols + [ycol]].dropna()
+    D = drop_window(f[cols + [ycol]].dropna(), cfg.train_exclude, d_va)
     dates = D.index
     n_tr = int((dates <= d_tr).sum())
     n_va = int(((dates > d_tr) & (dates <= d_va)).sum())
@@ -573,6 +578,18 @@ def run_one(f, ds, h, cfg: Config, d_tr, d_va):
     return out, info
 
 
+def drop_window(D: pd.DataFrame, window, d_va=None):
+    """Remove rows dated inside `window` (e.g. the COVID year) from the estimation
+    sample. Features/lags are computed beforehand on the full series, so only the
+    affected (X, y) pairs disappear. The window must lie before the test period."""
+    if not window:
+        return D
+    a, b = pd.Timestamp(window[0]), pd.Timestamp(window[1])
+    if d_va is not None and b > pd.Timestamp(d_va):
+        raise ValueError("train_exclude must end before the test period starts")
+    return D[~((D.index >= a) & (D.index <= b))]
+
+
 def run_stock(sym, stock, macro, cfg, d_tr, d_va, ea=None, iv=None):
     f = build_features(stock, macro, cfg, ea, iv)
     res, info = {}, {}
@@ -585,6 +602,8 @@ def run_stock(sym, stock, macro, cfg, d_tr, d_va, ea=None, iv=None):
 
 
 def split_dates(panel: pd.DataFrame, cfg: Config):
+    if cfg.split:
+        return pd.Timestamp(cfg.split[0]), pd.Timestamp(cfg.split[1])
     d = np.sort(panel["date"].unique())
     d = d[22:]                                           # first month lost to lags
     return pd.Timestamp(d[int(len(d) * cfg.train_frac) - 1]), \
@@ -747,7 +766,7 @@ def vi_for_stock(stock, macro, cfg, d_tr, d_va, which=("HAR-X", "EN", "RF", "NN"
     return VI per model (as in paper Figure 7) plus the fitted models."""
     f = build_features(stock, macro, cfg, ea, iv)
     mc = ml_cols("M_ALL", f)
-    D = f[mc + ["y1"]].dropna()
+    D = drop_window(f[mc + ["y1"]].dropna(), cfg.train_exclude, d_va)
     n_tr = int((D.index <= d_tr).sum())
     n_va = int(((D.index > d_tr) & (D.index <= d_va)).sum())
     tr, va = D.iloc[:n_tr], D.iloc[n_tr:n_tr + n_va]
@@ -767,6 +786,89 @@ def vi_for_stock(stock, macro, cfg, d_tr, d_va, which=("HAR-X", "EN", "RF", "NN"
         fitted["NN"] = NNEnsemble(mc, cfg.nn_archs[0], cfg).fit(tr, tr["y1"], va, va["y1"])
     vi = pd.DataFrame({k: variable_importance(m, tr, mc) for k, m in fitted.items()})
     return vi, fitted, tr
+
+
+# --------------------------------------------------------------------------- #
+# 6b. Extra analysis helpers (slides)
+# --------------------------------------------------------------------------- #
+
+# HAR rows of the paper's Tables 2-7 (Christensen, Siggaard & Veliyev). NN2_ens here = our
+# ensemble; paper NN2^10 = ensemble of best 10 of 100 nets.
+PAPER = {
+    ("M_HAR", 1): dict(LogHAR=.995, LevHAR=1.073, SHAR=1.009, HARQ=1.059, RR=1.000, LA=1.003, EN=.999,
+                       BG=1.147, RF=1.020, GB=1.054, NN2_1=.966, NN2_ens=.958),
+    ("M_ALL", 1): {"HAR-X": .966, "LogHAR": .901, "LevHAR": 1.003, "SHAR": 1.080, "HARQ": 1.289, "RR": .919,
+                   "LA": .936, "EN": .916, "BG": .961, "RF": .901, "GB": .962, "NN2_1": .893, "NN2_ens": .885},
+    ("M_HAR", 5): dict(LogHAR=1.091, LevHAR=1.089, SHAR=.937, HARQ=1.043, RR=1.019, LA=1.024, EN=1.019,
+                       BG=1.056, RF=.959, GB=1.164, NN2_1=.947, NN2_ens=.937),
+    ("M_ALL", 5): {"HAR-X": 1.037, "LogHAR": .970, "LevHAR": 1.076, "SHAR": .913, "HARQ": 1.459, "RR": .954,
+                   "LA": .958, "EN": .925, "BG": .840, "RF": .796, "GB": .930, "NN2_1": .865, "NN2_ens": .846},
+    ("M_HAR", 22): dict(LogHAR=1.052, LevHAR=1.030, SHAR=1.034, HARQ=.994, RR=1.100, LA=1.107, EN=1.111,
+                        BG=1.171, RF=1.019, GB=1.219, NN2_1=.989, NN2_ens=.958),
+    ("M_ALL", 22): {"HAR-X": 1.290, "LogHAR": .919, "LevHAR": 1.328, "SHAR": 1.312, "HARQ": 1.569, "RR": 1.111,
+                    "LA": 1.378, "EN": 1.107, "BG": .621, "RF": .604, "GB": .829, "NN2_1": .816, "NN2_ens": .786},
+}
+
+
+def vs_benchmark(preds, ds, h, bench="HAR", loss="mse", exclude=None):
+    """Fast version of the benchmark row of relative_table: per model the cross-sectional
+    average loss ratio vs `bench`, the share of stocks where it beats `bench`, and the
+    paper-style star string (one-sided DM test rejected for >50% of stocks at 10/5/1%)."""
+    L = loss_frames(preds, ds, h, loss, exclude)
+    models = [m for m in next(iter(L.values())).columns if m != bench]
+    rows = {}
+    for m in models:
+        rs, ps = [], []
+        for df in L.values():
+            rs.append(df[m].mean() / df[bench].mean())
+            ps.append(dm_test(df[bench], df[m], h)[1])
+        rs, ps = np.array(rs), np.array(ps)
+        star = ("***" if np.mean(ps < .01) > .5 else "**" if np.mean(ps < .05) > .5
+                else "*" if np.mean(ps < .10) > .5 else "")
+        rows[m] = {"rel": rs.mean(), "win": np.mean(rs < 1), "stars": star, "txt": f"{rs.mean():.3f}{star}"}
+    return pd.DataFrame(rows).T
+
+
+def rel_mse(preds, ds, h, bench="HAR", exclude=None):
+    """Cross-sectional average of MSE(model)/MSE(bench) -> Series (numeric, no stars)."""
+    return vs_benchmark(preds, ds, h, bench, "mse", exclude)["rel"].astype(float)
+
+
+def win_rate(preds, ds, h, bench="HAR"):
+    """Share of stocks for which a model has lower test MSE than the benchmark."""
+    R = per_stock_relative(preds, ds, h, bench)
+    return (R.drop(columns=bench) < 1).mean()
+
+
+def cumulative_gain(preds, ds, h, models, bench="HAR"):
+    """Cumulative loss differential vs. bench over the test period, averaged across
+    stocks. Each stock's daily differential is scaled by its mean bench loss, so the
+    end value equals 1 - relative MSE (x number of test days) and large-variance stocks
+    do not dominate. Rising = model gaining on the benchmark."""
+    out = []
+    for r in preds.values():
+        P = r[(ds, h)]
+        L = P.drop(columns="y").sub(P["y"], axis=0) ** 2
+        d = (L[bench].to_numpy()[:, None] - L[models].to_numpy()) / L[bench].mean()
+        out.append(pd.DataFrame(d, index=P.index, columns=models))
+    return (pd.concat(out).groupby(level=0).mean().cumsum())
+
+
+def linear_coefficients(panel, macro, cfg, d_va, exclude=None, iv=None):
+    """HAR and HAR-X (M_ALL, h=1) coefficients estimated on the initial in-sample
+    window (train + validation), per stock. `exclude` drops a date window."""
+    rows = []
+    for s, g in panel.groupby("symbol"):
+        f = build_features(g, macro, cfg, None, None if iv is None else iv[iv["symbol"] == s])
+        for name, ds in (("HAR", "M_HAR"), ("HAR-X", "M_ALL")):
+            spec = linear_spec(name, ds, f)
+            D = f[spec.cols + ["y1"]].dropna()
+            D = D[D.index <= pd.Timestamp(d_va)]
+            if exclude:
+                D = drop_window(D, exclude)
+            b = spec.fit(D, D["y1"]).b
+            rows.append({"symbol": s, "model": name, **dict(zip(["const"] + spec.cols, b))})
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- #
