@@ -38,6 +38,10 @@ Suggested order: start Plan B right now (works instantly), set up the Alpaca acc
 
 The paper's IV variable (OptionMetrics model-free IV) is one of its three most important predictors (Figure 7). The closest substitute we can get is LSEG's 30-day at-the-money implied vol:
 
+**Without code (Excel):** open `lseg/LSEG_IV_Download.xlsx` with the LSEG Workspace Excel add-in, refresh, save as values, then `python lseg/convert_lseg_excel.py LSEG_IV_values.xlsx` (instructions on the first sheet).
+
+**With code:**
+
 1. Open LSEG Workspace and log in with the uni account (the script uses the desktop session).
 2. `pip install lseg-data`
 3. `python fetch_iv_lseg.py` → writes `data/lseg/iv.csv` (date, symbol, iv)
