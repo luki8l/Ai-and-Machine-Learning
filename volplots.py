@@ -26,11 +26,11 @@ OTHER = "#b9b8b2"
 
 KEY_MODELS = ["LogHAR", "EN", "RF", "NN2_ens"]                # the four models on most slides
 COLOR = {"LogHAR": SERIES[0], "RF": SERIES[1], "EN": SERIES[2], "NN2_ens": SERIES[3], "GB": SERIES[4],
-         "HAR": INK2}
+         "HAR": INK2, "RF+LogHAR": INK, "LogRF": SERIES[6]}
 NAME = {"HAR": "HAR", "HAR-X": "HAR-X", "LogHAR": "LogHAR", "LevHAR": "LevHAR", "SHAR": "SHAR",
         "HARQ": "HARQ", "RR": "Ridge", "LA": "Lasso", "EN": "Elastic net", "RF": "Random forest",
         "BG": "Bagging", "GB": "Gradient boosting", "NN2_1": "Neural net (single)",
-        "NN2_ens": "Neural net (ensemble)"}
+        "NN2_ens": "Neural net (ensemble)", "RF+LogHAR": "RF + LogHAR (50/50)", "LogRF": "RF on log RV (ours)"}
 ORDER = ["HAR-X", "LogHAR", "LevHAR", "SHAR", "HARQ", "RR", "LA", "EN", "RF", "GB", "NN2_1", "NN2_ens"]
 DS_NAME = {"M_HAR": "RV lags only (M_HAR)", "M_ALL": "All predictors (M_ALL)"}
 H_NAME = {1: "1 day", 5: "1 week", 22: "1 month"}
@@ -144,9 +144,12 @@ def fig_rv_timeline(panel, splits: dict, events: dict | None = None, save=None, 
     return _save(fig, save)
 
 
-def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, save=None, figsize=None):
-    """Relative MSE vs HAR: ours next to the paper, per horizon. Blue < 1 (beats HAR)."""
+def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, extensions=(), save=None, figsize=None):
+    """Relative MSE vs HAR: ours next to the paper, per horizon. Blue < 1 (beats HAR).
+    `extensions`: our own models (no paper value), listed below a separator."""
     models = models or [m for m in ORDER if m in next(iter(preds.values()))[(ds, 1)].columns]
+    n_base = len(models)
+    models = list(models) + [m for m in extensions if m in next(iter(preds.values()))[(ds, 1)].columns]
     cols, data = [], []
     for h in (1, 5, 22):
         ours = V.rel_mse(preds, ds, h)
@@ -170,6 +173,8 @@ def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, save=None, figsize=None
     ax.grid(False)
     for j in (1.5, 3.5):
         ax.axvline(j, color=SURFACE, lw=4)
+    if len(models) > n_base:
+        ax.axhline(n_base - 0.5, color=INK, lw=1.5)
     ax.set_title(f"Relative MSE vs. HAR — {DS_NAME[ds]}", pad=12)
     ax.text(0, -0.02, "Below 1 = beats the HAR (blue). Bold = our replication (2016–2026), "
             "regular = original paper (2001–2017).", transform=ax.transAxes, fontsize=9, color=INK2, va="top")
@@ -302,10 +307,10 @@ def fig_scenarios(results: dict, ds="M_ALL", models=None, cap=2.0, save=None, fi
         ax.set_ylim(lo - 0.06, cap + 0.12)
     axes[0].set_ylabel("MSE relative to HAR")
     handles = [plt.Line2D([], [], color=color(m), marker="o", label=NAME[m]) for m in models]
-    fig.legend(handles=handles, loc="upper right", ncol=len(models), bbox_to_anchor=(1, 1.0))
-    fig.suptitle(f"Does the result depend on where COVID sits? — {ds}", x=0.01, ha="left",
+    fig.suptitle(f"Does the result depend on where COVID sits? — {DS_NAME[ds]}", x=0.01, ha="left",
                  fontsize=13, fontweight="bold", color=INK)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    fig.legend(handles=handles, loc="upper left", ncol=len(models), bbox_to_anchor=(0.01, 0.93), frameon=False)
     return _save(fig, save)
 
 
@@ -438,4 +443,49 @@ def fig_splits(splits: dict, start, end, events: dict | None = None, save=None, 
     if any(len(v) > 2 and v[2] for v in splits.values()):
         handles.append(mpl.patches.Patch(facecolor=SURFACE, edgecolor=MUTED, hatch="////", label="Removed from estimation"))
     bx.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=len(handles), fontsize=10)
+    return _save(fig, save)
+
+
+def fig_crosssection(preds, models=None, h=1, lo=0.6, hi=1.42, save=None, figsize=None):
+    """One dot per stock: relative MSE vs HAR with RV lags only (grey) and all predictors (colour),
+    our cross-sectional average (bar) and the paper's average (diamond); right: stocks beating HAR."""
+    models = models or ["LogHAR", "EN", "RF", "GB", "NN2_ens"]
+    T = {ds: V.per_stock_relative(preds, ds, h) for ds in ("M_HAR", "M_ALL")}
+    rng = np.random.default_rng(3)
+    fig, ax = plt.subplots(figsize=figsize or (12.5, 4.3))
+    for i, m in enumerate(models):
+        y0 = len(models) - 1 - i
+        for ds, dy, col in (("M_HAR", 0.2, OTHER), ("M_ALL", -0.2, color(m))):
+            v = T[ds][m].dropna()
+            inside = (v >= lo) & (v <= hi)
+            jit = rng.uniform(-0.07, 0.07, len(v))
+            ax.scatter(v[inside], y0 + dy + jit[inside.values], s=26, color=col, alpha=0.9,
+                       edgecolor="white", lw=0.5, zorder=3)
+            over = v[v > hi]
+            if len(over):
+                ax.scatter(hi, y0 + dy, marker=">", s=46, color=col, zorder=3)
+                lab = f"{over.idxmax()} {over.max():.1f}" if len(over) == 1 else f"{len(over)} stocks up to {over.max():.1f}"
+                ax.annotate(lab, (hi, y0 + dy), xytext=(-9, 0), textcoords="offset points", ha="right",
+                            va="center", fontsize=8.5, color=INK2)
+            ax.plot([v.mean()] * 2, [y0 + dy - 0.15, y0 + dy + 0.15], color=INK if ds == "M_ALL" else INK2,
+                    lw=2.4, zorder=4)
+            pap = V.PAPER.get((ds, h), {}).get(m)
+            if pap is not None:
+                ax.scatter(pap, y0 + dy, marker="D", s=46, facecolor="white", edgecolor=INK, lw=1.4, zorder=5)
+        n0, n1 = int((T["M_HAR"][m] < 1).sum()), int((T["M_ALL"][m] < 1).sum())
+        ax.text(hi + 0.045, y0, f"{n0} → {n1}", va="center", ha="left", fontsize=12, fontweight="bold",
+                color=color(m), clip_on=False)
+    ax.text(hi + 0.045, len(models) - 0.45, "stocks\nbeating HAR", va="bottom", ha="left", fontsize=8.5,
+            color=INK2, clip_on=False)
+    ax.axvline(1, color=INK2, lw=1, ls=(0, (3, 3)), zorder=1)
+    ax.set_yticks(range(len(models)), [NAME[m] for m in models][::-1], fontsize=11)
+    ax.set_xlim(lo - 0.01, hi + 0.02); ax.set_ylim(-0.6, len(models) - 0.4)
+    ax.set_xlabel(f"MSE relative to HAR, per stock ({H_NAME[h]} ahead)  ·  left of the dashed line = better than HAR",
+                  fontsize=10)
+    ax.grid(axis="y", visible=False)
+    hd = [plt.Line2D([], [], marker="o", ls="", color=OTHER, ms=7, label="RV lags only (one dot = one stock)"),
+          plt.Line2D([], [], marker="o", ls="", color=color("RF"), ms=7, label="All predictors"),
+          plt.Line2D([], [], color=INK, lw=2.4, label="Our average"),
+          plt.Line2D([], [], marker="D", ls="", mfc="white", mec=INK, ms=7, label="Paper average (2001–2017)")]
+    ax.legend(handles=hd, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4, frameon=False, fontsize=9.5)
     return _save(fig, save)

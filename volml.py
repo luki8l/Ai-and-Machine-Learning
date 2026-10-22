@@ -386,6 +386,27 @@ class SK:
         return self.m.predict((X[self.cols].to_numpy(float) - self.mu) / self.sd)
 
 
+class LogRFRegressor:
+    """Random forest fitted to log(RV) (our extension, in the spirit of the LogHAR). Forecasts are
+    mapped back to levels with Duan's smearing factor, mean(exp(residual)), computed from the
+    forest's out-of-bag residuals on the estimation window only (no look-ahead)."""
+
+    def __init__(self, cfg: "Config"):
+        self.cfg = cfg
+
+    def fit(self, Z, y):
+        from sklearn.ensemble import RandomForestRegressor
+        c = self.cfg
+        ly = np.log(np.asarray(y, float))
+        self.m = RandomForestRegressor(n_estimators=c.rf_trees, max_features=1 / 3, min_samples_leaf=c.rf_min_leaf,
+                                       n_jobs=1, random_state=c.seed, oob_score=True).fit(Z, ly)
+        self.smear = float(np.mean(np.exp(ly - self.m.oob_prediction_)))
+        return self
+
+    def predict(self, Z):
+        return np.exp(self.m.predict(Z)) * self.smear
+
+
 class NNEnsemble:
     """Feed-forward net, Adam (lr 1e-3), early stopping on the validation block,
     ensemble over random seeds (best `top` of `seeds` by validation MSE)."""
@@ -494,7 +515,7 @@ def _rolling(model_factory, D, ycol, start, h, window, every):
     return pred
 
 
-def run_one(f, ds, h, cfg: Config, d_tr, d_va):
+def run_one(f, ds, h, cfg: Config, d_tr, d_va, only=None):
     ycol = f"y{h}"
     models = list(cfg.models)
     if ds == "M_HAR" and "HAR-X" in models:
@@ -504,6 +525,9 @@ def run_one(f, ds, h, cfg: Config, d_tr, d_va):
     specs = {k: v for k, v in specs.items() if v is not None}
     cols = sorted(set(sum([s.cols for s in specs.values()], [])) | set(ml_cols(ds, f)))
     D = drop_window(f[cols + [ycol]].dropna(), cfg.train_exclude, d_va)
+    if only is not None:                                # fit only these models (same sample D)
+        models = list(only)
+        specs = {k: v for k, v in specs.items() if k in models}
     dates = D.index
     n_tr = int((dates <= d_tr).sum())
     n_va = int(((dates > d_tr) & (dates <= d_va)).sum())
@@ -547,6 +571,9 @@ def run_one(f, ds, h, cfg: Config, d_tr, d_va):
                 n_estimators=cfg.rf_trees, max_features=mf, min_samples_leaf=cfg.rf_min_leaf,
                 n_jobs=1, random_state=cfg.seed), scale=False)
             out[name] = _rolling(fac, D, ycol, start, h, n_tr + n_va, cfg.refit_trees)
+    if "LogRF" in models:                               # our extension: forest on log RV
+        fac = lambda: SK(mc, lambda: LogRFRegressor(cfg), scale=False)  # noqa: E731
+        out["LogRF"] = _rolling(fac, D, ycol, start, h, n_tr + n_va, cfg.refit_trees)
     if "GB" in models:
         best = (np.inf, None)
         for depth in (1, 2):
@@ -626,6 +653,67 @@ def run_all(cfg: Config, panel: pd.DataFrame, macro: pd.DataFrame, ea=None, iv=N
     preds = {s: r for s, r, _ in out}
     info = {s: i for s, _, i in out}
     return preds, info
+
+
+def _extra_stock(sym, stock, macro, cfg, d_tr, d_va, ea, iv, only, datasets):
+    f = build_features(stock, macro, cfg, ea, iv)
+    res = {}
+    for ds in datasets:
+        for h in cfg.horizons:
+            r, _ = run_one(f, ds, h, cfg, d_tr, d_va, only=only)
+            if r is not None:
+                res[(ds, h)] = r
+    return sym, res
+
+
+def run_extra(cfg: Config, panel, macro, only=("LogRF",), datasets=("M_ALL",), ea=None, iv=None):
+    """Fit only the models in `only` (same samples, split and schedule as run_all), e.g. to add
+    a model to cached results without re-estimating everything."""
+    from joblib import Parallel, delayed
+    panel = panel[(panel["date"] >= cfg.start)]
+    if cfg.end:
+        panel = panel[panel["date"] <= cfg.end]
+    d_tr, d_va = split_dates(panel, cfg)
+    syms = [s for s in cfg.symbols if s in set(panel["symbol"])]
+    jobs = (delayed(_extra_stock)(
+        s, panel[panel["symbol"] == s], macro, cfg, d_tr, d_va,
+        None if ea is None else ea[ea["symbol"] == s],
+        None if iv is None else iv[iv["symbol"] == s], only, datasets) for s in syms)
+    return dict(Parallel(n_jobs=cfg.n_jobs, verbose=5)(jobs))
+
+
+def save_extra(extra, path):
+    """Store run_extra output as a long CSV (portable across pandas versions)."""
+    rows = []
+    for s, r in extra.items():
+        for (ds, h), P in r.items():
+            rows.append(P.reset_index(names="date").assign(symbol=s, dataset=ds, h=h))
+    pd.concat(rows, ignore_index=True).to_csv(path, index=False)
+
+
+def load_extra(path):
+    """Inverse of save_extra -> {symbol: {(dataset, h): DataFrame(y, model columns)}}."""
+    L = pd.read_csv(path, parse_dates=["date"])
+    out = {}
+    for (s, ds, h), g in L.groupby(["symbol", "dataset", "h"]):
+        out.setdefault(s, {})[(ds, int(h))] = g.drop(columns=["symbol", "dataset", "h"]).set_index("date")
+    return out
+
+
+def merge_models(preds, extra):
+    """Add the model columns of `extra` (from run_extra) to `preds`; targets must match."""
+    out = {}
+    for s, r in preds.items():
+        out[s] = {}
+        for k, P in r.items():
+            Q = P.copy()
+            E = extra.get(s, {}).get(k)
+            if E is not None:
+                assert np.allclose(E["y"].reindex(Q.index), Q["y"], equal_nan=True), (s, k)
+                for c in E.columns.drop("y"):
+                    Q[c] = E[c].reindex(Q.index)
+            out[s][k] = Q
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -839,18 +927,20 @@ def rel_mse(preds, ds, h, bench="HAR", exclude=None):
 
 
 def insanity_filter(preds, panel):
-    """Clip every forecast made at day t to [min, max] of the stock's daily RV observed up to t
-    (expanding window, no look-ahead), identically for all models (Swanson & White 1997;
-    the paper applies such a filter to HARQ only). Guards against exploding extrapolations,
-    e.g. a LogHAR estimated on calm 2016-2019 data forecasting March 2020."""
+    """Clip every h-day forecast made at day t to [min, max] of the stock's realized h-day
+    average RV observed up to t (expanding window over targets already realized, so no
+    look-ahead), identically for all models incl. HAR (Swanson & White 1997; the paper applies
+    such a filter to HARQ only). For h = 1 this is the range of daily RV. Guards against
+    exploding extrapolations, e.g. a LogHAR estimated on calm 2016-2019 data forecasting March 2020."""
     out = {}
     for s, r in preds.items():
         rv = panel[panel["symbol"] == s].set_index("date")["rv"].sort_index()
-        lo, hi = rv.cummin(), rv.cummax()
         out[s] = {}
         for k, P in r.items():
+            rvh = rv.rolling(k[1]).mean()            # h-day average ending at t = target realized by t
+            l = rvh.cummin().reindex(P.index).values
+            u = rvh.cummax().reindex(P.index).values
             Q = P.copy()
-            l, u = lo.reindex(Q.index).values, hi.reindex(Q.index).values
             M = Q.drop(columns="y")
             Q[M.columns] = np.clip(M.values, l[:, None], u[:, None])
             out[s][k] = Q
@@ -927,3 +1017,17 @@ def simulate_panel(n_stocks=5, n_days=2800, seed=0):
                           "HSI": rng.exponential(1.0, n_days),
                           "ADS": np.cumsum(rng.normal(0, 0.05, n_days))}, index=dates)
     return pd.concat(rows, ignore_index=True), macro
+
+
+def add_combination(preds, members=("RF", "LogHAR"), name="RF+LogHAR"):
+    """Equal-weight forecast combination of `members` (weights fixed at 1/k, nothing estimated,
+    so no look-ahead). Returns a new preds dict with the extra column `name`."""
+    out = {}
+    for s, r in preds.items():
+        out[s] = {}
+        for k, P in r.items():
+            Q = P.copy()
+            if all(m in Q.columns for m in members):
+                Q[name] = Q[list(members)].mean(axis=1)
+            out[s][k] = Q
+    return out

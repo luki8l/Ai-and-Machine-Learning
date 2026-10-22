@@ -1,11 +1,11 @@
-# ML vs. HAR volatility forecasting: replication 2015–2026 with open data
+# ML vs. HAR volatility forecasting: replication 2016–2026 with open data
 
 Replication and time extension of **Christensen, Siggaard & Veliyev, "A machine learning approach to volatility forecasting"** (Journal of Financial Econometrics; arXiv:2601.13014) for the course *AI and Machine Learning* (Uni Liechtenstein). Project presentation: **23.10.**
 
 ## 1. The pitch in three sentences
 
 1. The paper finds (DJIA stocks, 2001–2017) that off-the-shelf ML beats the HAR benchmark for realized-variance forecasts, mostly when extra predictors are added and at longer horizons (random forest: about 40% lower MSE than HAR at the monthly horizon).
-2. We test whether this holds **out-of-sample in a new, non-overlapping regime (2015–2026)** using only **open data**.
+2. We test whether this holds **out-of-sample in a new, non-overlapping regime (2016–2026)** using only **open data**.
 3. Hypotheses: **H1** ML ≈ HAR with RV lags only (M_HAR); **H2** ML > HAR once extra predictors are added (M_ALL); **H3** the ML edge increases with the horizon (1 → 5 → 22 days).
 
 ## 2. Data: how we solved the data problem
@@ -76,7 +76,7 @@ Same as the paper: 70/10/20 split; targets = average RV over the next 1/5/22 day
 
 | Deviation | Reason |
 |---|---|
-| Sample 2015–2026 instead of 2001–2017; Dow 30 as listed in VOLARE | Data availability; this is the point of the extension |
+| Sample 2016–2026 instead of 2001–2017; Dow 30 as listed in VOLARE | Data availability; this is the point of the extension |
 | No per-stock implied vol / earnings dummy by default | Not openly available (CSV hooks exist) |
 | Regularized models re-estimated every 22 days, trees every 63 days (paper: daily); hyperparameters tuned once | Compute budget; configurable in `Config` |
 | NN in scikit-learn: ReLU, L2 + early stopping, best 5 of 10 seeds (paper: Leaky ReLU, dropout, best 10 of 100) | Simpler and reproducible; paper fn. 7 says ReLU makes no material difference |
@@ -136,3 +136,10 @@ Slide figures (PNG, 220 dpi) are written to `results/<run>/slides/`, all tables 
 - `build_notebook.py` – regenerates the notebook from source
 
 Cite VOLARE as: Cipollini, Cruciani, Gallo, Insana, Otranto & Spagnolo (2026), *VOLatility Archive for Realized Estimates (VOLARE)*, arXiv:2602.19732.
+
+## Our extensions (notebook sections 2 and 5)
+
+- **Random forest on log RV (`LogRF`)**: same forest settings as RF, fitted to log(RV) and mapped back with Duan's smearing factor from out-of-bag residuals of the estimation window. Baseline split, all predictors; cached in `results/<run>/baseline/logrf.csv` (`V.run_extra`).
+- **RF + LogHAR (50/50)**: equal-weight forecast combination, nothing estimated (`V.add_combination`).
+- **Insanity filter for the split comparison**: every h-day forecast is clipped to the range of h-day average RV realized up to the forecast day (no look-ahead, same rule for all models incl. HAR).
+- `python audit_checks.py` runs 25 sanity checks (targets, no look-ahead, DM test, OLS, LogHAR, ALE, COVID window, filter, combination, log-RF).

@@ -82,3 +82,21 @@ try:
     V.drop_window(d2, ("2020-01-01", "2026-01-01"), d_va="2024-01-01"); ok("exclusion into test refused", False)
 except ValueError:
     ok("exclusion into test refused", True)
+
+# ---------- 7. insanity filter uses only realized targets; combination; log-RF ----------
+dts = pd.bdate_range("2020-01-01", periods=80)
+pan = pd.DataFrame({"date": dts, "symbol": "X", "rv": np.linspace(1, 2, 80)})
+pan2 = pan.copy(); pan2.loc[60:, "rv"] = 1000.0               # change only the future after day 59
+Pq = pd.DataFrame({"y": 1.0, "M": 50.0}, index=dts[30:60])
+f1 = V.insanity_filter({"X": {("M_ALL", 5): Pq}}, pan)["X"][("M_ALL", 5)]
+f2 = V.insanity_filter({"X": {("M_ALL", 5): Pq}}, pan2)["X"][("M_ALL", 5)]
+ok("insanity filter ignores future RV (no look-ahead)", np.allclose(f1["M"], f2["M"]))
+ok("insanity bound = max of 5-day averages realized so far",
+   np.isclose(f1["M"].iloc[0], pan["rv"].rolling(5).mean().iloc[:31].max()))
+Pc = pd.DataFrame({"y": 1.0, "RF": [1.0, 3.0], "LogHAR": [2.0, 5.0]})
+ok("RF+LogHAR = equal-weight mean", np.allclose(V.add_combination({"X": {("M_ALL", 1): Pc}})["X"][("M_ALL", 1)]["RF+LogHAR"], [1.5, 4.0]))
+rng2 = np.random.default_rng(1)
+Zl = rng2.normal(size=(1500, 3)); yl = np.exp(0.5 * Zl[:, 0] + rng2.normal(scale=0.6, size=1500))
+cl = V.Config(); cl.rf_trees = 200
+pl = V.LogRFRegressor(cl).fit(Zl[:1000], yl[:1000]).predict(Zl[1000:])
+ok(f"log-RF forecasts unbiased in levels (mean ratio {pl.mean() / yl[1000:].mean():.2f})", abs(pl.mean() / yl[1000:].mean() - 1) < 0.1)

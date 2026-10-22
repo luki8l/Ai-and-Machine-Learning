@@ -151,6 +151,29 @@ for name in RUN:
 preds = RESULTS["baseline"]                    # sections 3-5 use the baseline split
 """)
 
+md(r"""
+### Our extension: random forest on log RV
+
+The random forest fails at the one-month horizon (section 3). Our fix, in the spirit of the LogHAR: the same forest (500 trees, mtry = p/3, min node 5, re-estimated every 63 days on the same rolling window) is fitted to log RV and mapped back to levels with Duan's smearing factor from its out-of-bag residuals (estimation window only, no look-ahead). Baseline split, all predictors. Cached in `results/<run>/baseline/logrf.csv`; computing it takes roughly 5–15 min.
+""")
+code(r"""
+path = os.path.join(OUT, "baseline", "logrf.csv")
+if os.path.exists(path):
+    extra = V.load_extra(path)
+else:
+    t0 = time.time()
+    extra = V.run_extra(scenario_cfg("baseline"), panel, macro, only=("LogRF",), datasets=("M_ALL",), ea=ea, iv=iv)
+    V.save_extra(extra, path)
+    print(f"LogRF: done in {(time.time() - t0) / 60:.1f} min")
+RESULTS["baseline"] = V.merge_models(RESULTS["baseline"], extra)
+preds = RESULTS["baseline"]
+logrf = pd.DataFrame({P.H_NAME[h]: V.vs_benchmark(preds, "M_ALL", h).loc[["RF", "LogRF", "LogHAR"], "txt"]
+                      for h in cfg.horizons})
+logrf.index = ["Random forest", "Random forest on log RV", "LogHAR"]
+TABLES["T12_logrf_extension"] = logrf
+logrf
+""")
+
 # --------------------------------------------------------------------------- #
 md(r"""
 ## 3. Main result (baseline split): replication vs. the paper
@@ -169,11 +192,12 @@ TABLES["T2_vs_paper_baseline"] = summary
 summary
 """)
 code(r"""
-P.fig_heatmap_vs_paper(preds, "M_ALL", save=f"{FIG}/02_heatmap_vs_paper_M_ALL.png"); plt.show()
+P.fig_heatmap_vs_paper(V.add_combination(preds), "M_ALL", extensions=("LogRF", "RF+LogHAR"),
+                       save=f"{FIG}/02_heatmap_vs_paper_M_ALL.png"); plt.show()
 P.fig_heatmap_vs_paper(preds, "M_HAR", save=f"{FIG}/03_heatmap_vs_paper_M_HAR.png"); plt.show()
 """)
 code(r"""
-P.fig_dumbbell(preds, "M_ALL", save=f"{FIG}/04_dumbbell_vs_paper_M_ALL.png"); plt.show()
+P.fig_dumbbell(preds, "M_ALL", models=P.KEY_MODELS + ["GB", "LogRF"], save=f"{FIG}/04_dumbbell_vs_paper_M_ALL.png"); plt.show()
 """)
 md("Full pairwise matrix in the paper's layout (row = benchmark, column = model), $\\mathcal M_{ALL}$, 1 day:")
 code(r"""
@@ -220,6 +244,8 @@ dec = V.decile_table(preds, "M_ALL", 1, models=P.KEY_MODELS)
 TABLES["T6_deciles_M_ALL_h1"] = dec.round(3)
 P.fig_deciles(dec, save=f"{FIG}/09_deciles_M_ALL_h1.png"); plt.show()
 P.fig_boxplot(preds, "M_ALL", 1, save=f"{FIG}/10_boxplot_M_ALL_h1.png"); plt.show()
+# slide version: one dot per stock, RV lags only vs all predictors, our vs the paper's average
+P.fig_crosssection(preds, save=f"{FIG}/10b_crosssection_h1.png"); plt.show()
 """)
 
 # --------------------------------------------------------------------------- #
@@ -228,18 +254,20 @@ md(r"""
 
 Same models, same data, three splits. Read the figure per model: a flat line = robust to the split; a model that only wins in one scenario owes its result to the sample design.
 
-**Insanity filter.** In "COVID in test", models estimated on calm 2016–2019 data extrapolate wildly in March 2020 (LogHAR's relative MSE runs into the billions). For the scenario comparison every forecast is therefore clipped to the range of daily RV observed up to the forecast day (expanding min/max, no look-ahead), identically for all models incl. HAR. It touches well under 1% of forecasts. The unfiltered table is shown too.
+**Insanity filter.** In "COVID in test", models estimated on calm 2016–2019 data extrapolate wildly in March 2020 (LogHAR's relative MSE runs into the billions). For the scenario comparison every h-day forecast is therefore clipped to the range of h-day average RV realized up to the forecast day (expanding min/max, no look-ahead), identically for all models incl. HAR. It touches less than 0.5% of forecasts. The unfiltered table is shown too.
 """)
 code(r"""
 labels = {n: SCENARIOS[n]["label"] for n in RESULTS}
 RESULTS_F = {n: V.insanity_filter(r, panel) for n, r in RESULTS.items()}
+# equal-weight combination of random forest and LogHAR (weights fixed at 1/2, nothing estimated)
+RESULTS_F = {n: V.add_combination(r, ("RF", "LogHAR"), "RF+LogHAR") for n, r in RESULTS_F.items()}
 def scen_table(res):
     out = {}
     for ds in cfg.datasets:
         for h in cfg.horizons:
             for n, r in res.items():
                 out[(ds, f"h={h}", labels[n])] = V.vs_benchmark(r, ds, h)["txt"]
-    out = pd.DataFrame(out).reindex(P.ORDER).fillna("")
+    out = pd.DataFrame(out).reindex(P.ORDER + ["RF+LogHAR"]).fillna("")
     out.index = [P.NAME[m] for m in out.index]
     return out
 scen = scen_table(RESULTS_F)
@@ -248,7 +276,7 @@ TABLES["T7b_scenarios_unfiltered"] = scen_table(RESULTS)
 print("Filtered (used for slides):"); display(scen)
 print("Unfiltered:"); display(TABLES["T7b_scenarios_unfiltered"])
 named = {labels[n]: r for n, r in RESULTS_F.items()}
-P.fig_scenarios(named, "M_ALL", save=f"{FIG}/11_scenarios_M_ALL.png"); plt.show()
+P.fig_scenarios(named, "M_ALL", models=P.KEY_MODELS + ["RF+LogHAR"], save=f"{FIG}/11_scenarios_M_ALL.png"); plt.show()
 P.fig_scenarios(named, "M_HAR", save=f"{FIG}/12_scenarios_M_HAR.png"); plt.show()
 """)
 code(r"""
