@@ -638,15 +638,19 @@ def qlike(y, p):
 
 def dm_test(e_bench, e_model, h=1):
     """One-sided Diebold-Mariano: H1 = model has lower expected loss than bench.
-    HAC variance (Newey-West, h-1 lags) + Harvey-Leybourne-Newbold correction."""
+    Long-run variance with h-1 autocovariances (rectangular kernel, as in Diebold & Mariano
+    1995) + Harvey-Leybourne-Newbold small-sample correction, Student-t critical values."""
     d = np.asarray(e_bench) - np.asarray(e_model)
     d = d[np.isfinite(d)]
     T = len(d)
     dc = d - d.mean()
     lag = max(h - 1, 0)
-    v = dc @ dc / T
-    for k in range(1, lag + 1):
-        v += 2 * (1 - k / (lag + 1)) * (dc[k:] @ dc[:-k]) / T
+    gam = [dc @ dc / T] + [(dc[k:] @ dc[:-k]) / T for k in range(1, lag + 1)]
+    # Diebold-Mariano (1995): rectangular kernel with h-1 lags (h-step forecast errors are
+    # MA(h-1)); fall back to Bartlett weights if that estimate is not positive.
+    v = gam[0] + 2 * sum(gam[1:])
+    if v <= 0:
+        v = gam[0] + 2 * sum((1 - k / (lag + 1)) * g for k, g in enumerate(gam[1:], 1))
     if v <= 0:
         return np.nan, np.nan
     stat = d.mean() / np.sqrt(v / T)
@@ -832,6 +836,25 @@ def vs_benchmark(preds, ds, h, bench="HAR", loss="mse", exclude=None):
 def rel_mse(preds, ds, h, bench="HAR", exclude=None):
     """Cross-sectional average of MSE(model)/MSE(bench) -> Series (numeric, no stars)."""
     return vs_benchmark(preds, ds, h, bench, "mse", exclude)["rel"].astype(float)
+
+
+def insanity_filter(preds, panel):
+    """Clip every forecast made at day t to [min, max] of the stock's daily RV observed up to t
+    (expanding window, no look-ahead), identically for all models (Swanson & White 1997;
+    the paper applies such a filter to HARQ only). Guards against exploding extrapolations,
+    e.g. a LogHAR estimated on calm 2016-2019 data forecasting March 2020."""
+    out = {}
+    for s, r in preds.items():
+        rv = panel[panel["symbol"] == s].set_index("date")["rv"].sort_index()
+        lo, hi = rv.cummin(), rv.cummax()
+        out[s] = {}
+        for k, P in r.items():
+            Q = P.copy()
+            l, u = lo.reindex(Q.index).values, hi.reindex(Q.index).values
+            M = Q.drop(columns="y")
+            Q[M.columns] = np.clip(M.values, l[:, None], u[:, None])
+            out[s][k] = Q
+    return out
 
 
 def win_rate(preds, ds, h, bench="HAR"):

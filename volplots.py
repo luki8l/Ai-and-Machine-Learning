@@ -88,15 +88,18 @@ def _end_labels(ax, series: dict, fmt="{:.2f}"):
 # --------------------------------------------------------------------------- #
 # Figures
 # --------------------------------------------------------------------------- #
-def fig_rv_timeline(panel, splits: dict, events: dict | None = None, save=None):
+def fig_rv_timeline(panel, splits: dict, events: dict | None = None, save=None, figsize=None):
     """Cross-sectional median annualized realized volatility (IQR band) with the
     train / validation / test periods of each split scenario as bars underneath."""
     rv = panel.pivot(index="date", columns="symbol", values="rv")
     vol = np.sqrt(252 * rv)
     med, q1, q3 = vol.median(1), vol.quantile(.25, 1), vol.quantile(.75, 1)
-    fig = plt.figure(figsize=(12, 5.2))
-    gs = fig.add_gridspec(2, 1, height_ratios=[4, 0.32 * len(splits) + 0.3], hspace=0.08)
-    ax = fig.add_subplot(gs[0])
+    if not splits:                                     # RV panel only (e.g. for a data slide)
+        fig, ax = plt.subplots(figsize=figsize or (12, 4.6))
+    else:
+        fig = plt.figure(figsize=figsize or (12, 5.2))
+        gs = fig.add_gridspec(2, 1, height_ratios=[4, 0.32 * len(splits) + 0.3], hspace=0.08)
+        ax = fig.add_subplot(gs[0])
     ax.fill_between(med.index, q1, q3, color=SERIES[0], alpha=0.18, lw=0, label="Interquartile range")
     ax.plot(med.index, med, color=SERIES[0], lw=1.2, label="Median across stocks")
     ax.set_ylabel("Realized volatility, annualized (%)")
@@ -104,13 +107,16 @@ def fig_rv_timeline(panel, splits: dict, events: dict | None = None, save=None):
     _subtitle(ax, "Daily 5-minute realized variance, annualized; median and interquartile range across stocks")
     ax.legend(loc="upper right")
     ax.set_xlim(med.index[0], med.index[-1])
-    ax.tick_params(labelbottom=False)
+    if splits:
+        ax.tick_params(labelbottom=False)
     for name, (d0, d1) in (events or {}).items():
         d0, d1 = pd.Timestamp(d0), pd.Timestamp(d1)
         y = med[(med.index >= d0) & (med.index <= d1)].max()
         ax.annotate(name, xy=(d0 + (d1 - d0) / 2, y), xytext=(0, 14), textcoords="offset points",
                     ha="center", fontsize=9, color=INK2,
                     arrowprops=dict(arrowstyle="-", color=MUTED, lw=0.8))
+    if not splits:
+        return _save(fig, save)
     bx = fig.add_subplot(gs[1], sharex=ax)
     shades = {"train": "#9ec5f4", "val": "#fab219", "test": "#e34948"}
     for i, (name, spec) in enumerate(splits.items()):
@@ -138,7 +144,7 @@ def fig_rv_timeline(panel, splits: dict, events: dict | None = None, save=None):
     return _save(fig, save)
 
 
-def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, save=None):
+def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, save=None, figsize=None):
     """Relative MSE vs HAR: ours next to the paper, per horizon. Blue < 1 (beats HAR)."""
     models = models or [m for m in ORDER if m in next(iter(preds.values()))[(ds, 1)].columns]
     cols, data = [], []
@@ -147,7 +153,7 @@ def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, save=None):
         data += [ours.reindex(models).values, pd.Series(V.PAPER[(ds, h)]).reindex(models).values]
         cols += [f"{H_NAME[h]}\nours", f"{H_NAME[h]}\npaper"]
     M = np.array(data).T
-    fig, ax = plt.subplots(figsize=(8.6, 0.42 * len(models) + 1.6))
+    fig, ax = plt.subplots(figsize=figsize or (8.6, 0.42 * len(models) + 1.6))
     norm = TwoSlopeNorm(vmin=0.6, vcenter=1.0, vmax=1.6)
     ax.imshow(np.clip(M, 0.6, 1.6), cmap=DIVERGING, norm=norm, aspect="auto")
     for i in range(M.shape[0]):
@@ -172,10 +178,10 @@ def fig_heatmap_vs_paper(preds, ds="M_ALL", models=None, save=None):
     return _save(fig, save)
 
 
-def fig_dumbbell(preds, ds="M_ALL", models=None, save=None):
+def fig_dumbbell(preds, ds="M_ALL", models=None, save=None, figsize=None):
     """Ours (filled) vs paper (hollow) per model and horizon."""
     models = models or KEY_MODELS + ["GB"]
-    fig, axes = plt.subplots(1, 3, figsize=(12, 0.5 * len(models) + 1.8), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=figsize or (12, 0.5 * len(models) + 1.8), sharey=True)
     for ax, h in zip(axes, (1, 5, 22)):
         ours = V.rel_mse(preds, ds, h).reindex(models)
         paper = pd.Series(V.PAPER[(ds, h)]).reindex(models)
@@ -187,12 +193,13 @@ def fig_dumbbell(preds, ds="M_ALL", models=None, save=None):
             ax.annotate(f"{ours[m]:.2f}", (ours[m], y), xytext=(0, 9), textcoords="offset points",
                         ha="center", fontsize=8.5, color=INK)
         ax.axvline(1, color=INK2, lw=1, ls=(0, (3, 3)))
-        ax.set_title(H_NAME[h], fontsize=11.5)
+        ax.set_title(H_NAME[h], fontsize=11.5, pad=14)
         ax.set_yticks(range(len(models)), [NAME[m] for m in models][::-1])
         ax.set_xlabel("MSE relative to HAR")
         lo = min(np.nanmin(ours.values), np.nanmin(paper.values), 0.9)
         hi = max(np.nanmax(ours.values), np.nanmax(paper.values), 1.1)
         ax.set_xlim(lo - 0.08, hi + 0.08)
+        ax.set_ylim(-0.6, len(models) - 0.3)
         ax.grid(axis="y", visible=False)
     fig.suptitle(f"Replication vs. original paper — {DS_NAME[ds]}", x=0.01, ha="left",
                  fontsize=13, fontweight="bold", color=INK)
@@ -204,12 +211,12 @@ def fig_dumbbell(preds, ds="M_ALL", models=None, save=None):
     return _save(fig, save)
 
 
-def fig_cumgain(preds, ds="M_ALL", h=1, models=None, events=None, save=None):
+def fig_cumgain(preds, ds="M_ALL", h=1, models=None, events=None, save=None, figsize=None):
     """Cumulative relative loss differential vs HAR over the test period."""
     models = models or KEY_MODELS
     C = V.cumulative_gain(preds, ds, h, models)
     n = len(C)
-    fig, ax = plt.subplots(figsize=(11, 4.8))
+    fig, ax = plt.subplots(figsize=figsize or (11, 4.8))
     for m in models:
         ax.plot(C.index, C[m] / n, color=color(m), lw=2)
     ax.axhline(0, color=INK2, lw=1)
@@ -229,13 +236,13 @@ def fig_cumgain(preds, ds="M_ALL", h=1, models=None, events=None, save=None):
     return _save(fig, save)
 
 
-def fig_forecast_zoom(preds, sym, ds="M_ALL", h=1, models=None, start=None, end=None, save=None):
+def fig_forecast_zoom(preds, sym, ds="M_ALL", h=1, models=None, start=None, end=None, save=None, figsize=None):
     """Realized vs forecast annualized volatility for one stock around an episode."""
     models = models or ["HAR", "LogHAR", "RF"]
     P = preds[sym][(ds, h)]
     P = P.loc[start:end]
     ann = lambda x: np.sqrt(252 * x)  # noqa: E731
-    fig, ax = plt.subplots(figsize=(11, 4.4))
+    fig, ax = plt.subplots(figsize=figsize or (11, 4.4))
     ax.plot(P.index, ann(P["y"]), color=INK, lw=1.2, label="Realized")
     for m in models:
         ax.plot(P.index, ann(P[m]), color=color(m), lw=1.8, label=f"{NAME[m]} forecast")
@@ -246,11 +253,11 @@ def fig_forecast_zoom(preds, sym, ds="M_ALL", h=1, models=None, start=None, end=
     return _save(fig, save)
 
 
-def fig_winrate(preds, ds="M_ALL", models=None, save=None):
+def fig_winrate(preds, ds="M_ALL", models=None, save=None, figsize=None):
     """Share of stocks where each model beats the HAR (sequential blue)."""
     models = models or [m for m in ORDER if m in next(iter(preds.values()))[(ds, 1)].columns]
     W = pd.DataFrame({H_NAME[h]: V.win_rate(preds, ds, h).reindex(models) for h in (1, 5, 22)})
-    fig, ax = plt.subplots(figsize=(5.8, 0.42 * len(models) + 1.4))
+    fig, ax = plt.subplots(figsize=figsize or (5.8, 0.42 * len(models) + 1.4))
     ax.imshow(W.values, cmap=SEQ_BLUE, vmin=0, vmax=1, aspect="auto")
     for i in range(W.shape[0]):
         for j in range(W.shape[1]):
@@ -267,20 +274,32 @@ def fig_winrate(preds, ds="M_ALL", models=None, save=None):
     return _save(fig, save)
 
 
-def fig_scenarios(results: dict, ds="M_ALL", models=None, save=None):
-    """Relative MSE of key models across split scenarios (small multiples per horizon)."""
+def fig_scenarios(results: dict, ds="M_ALL", models=None, cap=2.0, save=None, figsize=None):
+    """Relative MSE of key models across split scenarios (small multiples per horizon).
+    Values above `cap` are drawn at the cap as a triangle with the true value written next to it."""
     models = models or KEY_MODELS
     names = list(results)
-    fig, axes = plt.subplots(1, 3, figsize=(12.5, 4.3), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=figsize or (12.5, 4.3), sharey=True)
+    lo = 1.0
     for ax, h in zip(axes, (1, 5, 22)):
+        n_clip = {}
         for m in models:
-            ys = [V.rel_mse(results[s], ds, h).get(m, np.nan) for s in names]
-            ax.plot(range(len(names)), ys, color=color(m), marker="o", ms=7, lw=1.8,
+            ys = np.array([V.rel_mse(results[s], ds, h).get(m, np.nan) for s in names], float)
+            lo = min(lo, np.nanmin(ys))
+            yc = np.minimum(ys, cap)
+            ax.plot(range(len(names)), yc, color=color(m), marker="o", ms=7, lw=1.8,
                     markeredgecolor=SURFACE, markeredgewidth=1.5)
+            for i in np.where(ys > cap)[0]:
+                k = n_clip.get(i, 0); n_clip[i] = k + 1
+                ax.scatter(i, cap, marker="^", s=90, color=color(m), edgecolor=SURFACE, zorder=4)
+                ax.annotate(f"{NAME.get(m, m)} {ys[i]:.1f}", (i, cap), xytext=(9, -4 - 12 * k),
+                            textcoords="offset points", fontsize=8.5, color=INK)
         ax.axhline(1, color=INK2, lw=1, ls=(0, (3, 3)))
         ax.set_xticks(range(len(names)), names, rotation=0)
         ax.set_title(H_NAME[h], fontsize=11.5)
         ax.set_xlim(-0.3, len(names) - 0.7)
+    for ax in axes:
+        ax.set_ylim(lo - 0.06, cap + 0.12)
     axes[0].set_ylabel("MSE relative to HAR")
     handles = [plt.Line2D([], [], color=color(m), marker="o", label=NAME[m]) for m in models]
     fig.legend(handles=handles, loc="upper right", ncol=len(models), bbox_to_anchor=(1, 1.0))
@@ -290,10 +309,10 @@ def fig_scenarios(results: dict, ds="M_ALL", models=None, save=None):
     return _save(fig, save)
 
 
-def fig_coefficients(coef: pd.DataFrame, save=None):
+def fig_coefficients(coef: pd.DataFrame, save=None, figsize=None):
     """HAR coefficients per stock, estimated with vs without the COVID window."""
     terms = ["RVD", "RVW", "RVM"]
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=figsize or (11, 4.2), sharey=True)
     rng = np.random.default_rng(0)
     for ax, model in zip(axes, ("HAR", "HAR-X")):
         C = coef[coef["model"] == model]
@@ -319,10 +338,10 @@ def fig_coefficients(coef: pd.DataFrame, save=None):
     return _save(fig, save)
 
 
-def fig_boxplot(preds, ds="M_ALL", h=1, models=None, save=None):
+def fig_boxplot(preds, ds="M_ALL", h=1, models=None, save=None, figsize=None):
     models = models or [m for m in ORDER if m in next(iter(preds.values()))[(ds, h)].columns]
     R = V.per_stock_relative(preds, ds, h)[models]
-    fig, ax = plt.subplots(figsize=(11, 4.4))
+    fig, ax = plt.subplots(figsize=figsize or (11, 4.4))
     bp = ax.boxplot([R[m].dropna() for m in models], patch_artist=True, widths=0.55,
                     medianprops=dict(color=INK, lw=1.6), whiskerprops=dict(color=MUTED),
                     capprops=dict(color=MUTED), flierprops=dict(marker="o", ms=3, mfc=MUTED, mec="none"))
@@ -337,9 +356,9 @@ def fig_boxplot(preds, ds="M_ALL", h=1, models=None, save=None):
     return _save(fig, save)
 
 
-def fig_deciles(dec: pd.DataFrame, save=None):
+def fig_deciles(dec: pd.DataFrame, save=None, figsize=None):
     """Relative MSE per decile of realized variance (paper Fig. 5)."""
-    fig, ax = plt.subplots(figsize=(10, 4.2))
+    fig, ax = plt.subplots(figsize=figsize or (10, 4.2))
     for m in dec.columns:
         ax.plot(dec.index + 1, dec[m], color=color(m), marker="o", ms=5, lw=1.8)
     ax.axhline(1, color=INK2, lw=1, ls=(0, (3, 3)))
@@ -388,4 +407,35 @@ def fig_ale(fitted: dict, X: pd.DataFrame, cols, sym="", save=None):
     fig.suptitle(f"How predictions respond to each input — {sym} (paper Fig. 6)", x=0.01, ha="left",
                  fontsize=13, fontweight="bold", color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
+    return _save(fig, save)
+
+
+def fig_splits(splits: dict, start, end, events: dict | None = None, save=None, figsize=None):
+    """Compact chart of the train / validation / test periods of each split scenario."""
+    fig, bx = plt.subplots(figsize=figsize or (12, 0.62 * len(splits) + 1.3))
+    shades = {"train": "#9ec5f4", "val": "#fab219", "test": "#e34948"}
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    for i, (name, spec) in enumerate(splits.items()):
+        d_tr, d_va = pd.Timestamp(spec[0]), pd.Timestamp(spec[1])
+        excl = spec[2] if len(spec) > 2 else None
+        y = len(splits) - 1 - i
+        for seg, a, b in (("train", start, d_tr), ("val", d_tr, d_va), ("test", d_va, end)):
+            bx.barh(y, b - a, left=a, height=0.62, color=shades[seg], edgecolor=SURFACE, linewidth=2)
+        if excl:
+            a, b = pd.Timestamp(excl[0]), pd.Timestamp(excl[1])
+            bx.barh(y, b - a, left=a, height=0.62, color=SURFACE, edgecolor=MUTED, hatch="////", linewidth=0.8)
+        bx.text(-0.008, y, name, transform=bx.get_yaxis_transform(), ha="right", va="center", fontsize=11, color=INK)
+    for name, (d0, d1) in (events or {}).items():
+        d0, d1 = pd.Timestamp(d0), pd.Timestamp(d1)
+        bx.axvspan(d0, d1, color=INK2, alpha=0.10, lw=0, zorder=0)
+        bx.text(d0 + (d1 - d0) / 2, len(splits) - 0.45, name, ha="center", va="bottom", fontsize=9.5, color=INK2)
+    bx.set_yticks([]); bx.set_ylim(-0.5, len(splits) - 0.1)
+    bx.set_xlim(start, end)
+    bx.grid(axis="y", visible=False)
+    bx.spines["left"].set_visible(False)
+    handles = [mpl.patches.Patch(color=c, label={"train": "Training", "val": "Validation",
+                                                 "test": "Test (out-of-sample)"}[k]) for k, c in shades.items()]
+    if any(len(v) > 2 and v[2] for v in splits.values()):
+        handles.append(mpl.patches.Patch(facecolor=SURFACE, edgecolor=MUTED, hatch="////", label="Removed from estimation"))
+    bx.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=len(handles), fontsize=10)
     return _save(fig, save)

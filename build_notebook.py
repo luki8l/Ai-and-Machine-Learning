@@ -121,6 +121,7 @@ for name in SCENARIOS:
     print(f"{SCENARIOS[name]['label']:14s} train <= {d_tr.date()}  val <= {d_va.date()}  test after"
           + (f"   (removed: {SCENARIOS[name]['train_exclude']})" if SCENARIOS[name]["train_exclude"] else ""))
 P.fig_rv_timeline(panel, SPLITS, EVENTS, save=f"{FIG}/01_rv_timeline_splits.png"); plt.show()
+P.fig_splits(SPLITS, panel["date"].min(), panel["date"].max(), EVENTS, save=f"{FIG}/02_splits.png"); plt.show()
 """)
 
 # --------------------------------------------------------------------------- #
@@ -226,19 +227,27 @@ md(r"""
 ## 5. Split sensitivity: does it matter where COVID sits?
 
 Same models, same data, three splits. Read the figure per model: a flat line = robust to the split; a model that only wins in one scenario owes its result to the sample design.
+
+**Insanity filter.** In "COVID in test", models estimated on calm 2016–2019 data extrapolate wildly in March 2020 (LogHAR's relative MSE runs into the billions). For the scenario comparison every forecast is therefore clipped to the range of daily RV observed up to the forecast day (expanding min/max, no look-ahead), identically for all models incl. HAR. It touches well under 1% of forecasts. The unfiltered table is shown too.
 """)
 code(r"""
 labels = {n: SCENARIOS[n]["label"] for n in RESULTS}
-scen = {}
-for ds in cfg.datasets:
-    for h in cfg.horizons:
-        for n, r in RESULTS.items():
-            scen[(ds, f"h={h}", labels[n])] = V.vs_benchmark(r, ds, h)["txt"]
-scen = pd.DataFrame(scen).reindex(P.ORDER).fillna("")
-scen.index = [P.NAME[m] for m in scen.index]
+RESULTS_F = {n: V.insanity_filter(r, panel) for n, r in RESULTS.items()}
+def scen_table(res):
+    out = {}
+    for ds in cfg.datasets:
+        for h in cfg.horizons:
+            for n, r in res.items():
+                out[(ds, f"h={h}", labels[n])] = V.vs_benchmark(r, ds, h)["txt"]
+    out = pd.DataFrame(out).reindex(P.ORDER).fillna("")
+    out.index = [P.NAME[m] for m in out.index]
+    return out
+scen = scen_table(RESULTS_F)
 TABLES["T7_scenarios"] = scen
-display(scen)
-named = {labels[n]: r for n, r in RESULTS.items()}
+TABLES["T7b_scenarios_unfiltered"] = scen_table(RESULTS)
+print("Filtered (used for slides):"); display(scen)
+print("Unfiltered:"); display(TABLES["T7b_scenarios_unfiltered"])
+named = {labels[n]: r for n, r in RESULTS_F.items()}
 P.fig_scenarios(named, "M_ALL", save=f"{FIG}/11_scenarios_M_ALL.png"); plt.show()
 P.fig_scenarios(named, "M_HAR", save=f"{FIG}/12_scenarios_M_HAR.png"); plt.show()
 """)
